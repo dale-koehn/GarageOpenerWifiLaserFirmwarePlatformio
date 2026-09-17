@@ -27,6 +27,8 @@
 #include <WiFiClient.h>
 
 // For MQTT
+// Must be defined before including PubSubClient.h to actually take effect.
+#define MQTT_KEEPALIVE 10
 #include <PubSubClient.h>
 
 #include <Wire.h>
@@ -38,12 +40,6 @@ VL53L0X sensor;
 
 /////////////////////////////////////////////////
 // MQTT stuff
-
-#define MQTT_KEEPALIVE 10
-
-// MQTT topics
-//#define STATUS_TOPIC "/myhouse/garage/GarageOpener_v3/status"
-//#define COMMAND_TOPIC "/myhouse/garage/GarageOpener_v3/commands"
 
 #define STATUS_TOPIC "/myhouse/garage/opener/status"
 #define COMMAND_TOPIC "/myhouse/garage/opener/commands"
@@ -104,30 +100,6 @@ PubSubClient client(espClient);
 //#define HIGH_SPEED
 //#define HIGH_ACCURACY
 
-#define GREEN_LIGHT_PIN 16
-#define RED_LIGHT_PIN 14
-
-/////////////////////////////////////////////////
-// Other distance checking related
-
-// When at 16.5 inches from front wall looks like there is right at 10 inches clearance from back bumper to garage door
-// Will call 16.5 a good middle of the road for the acceptable range
-// Will use this information along with a little safety margin to set min and max distances
-
-// Max distance from the wall (min from the garage door)
-// This should give about 4.5" from back bumper to garage door
-#define GOOD_DIST_MAX 22*25.4
-
-// Min distance from the wall (max from the garage door)
-#define GOOD_DIST_MIN 11*25.4
-
-// Am trying 23 inches as the median threshold
-#define GOOD_CENTER 16.5*25.4
-
-// How frequently to poll for distance
-// This could probably go WAY down fo rthe garage opener
-#define POLL_FREQUENCY_MS DIST_CHECK_INTERVAL
-
 /////////////////////////////////////////////////
 // Web server
 
@@ -144,13 +116,9 @@ const String webPass = "admin";
 
 String validLoginPwCookieValue = String("login=") + webUser + ":" + webPass;
 
-//const char* ssid = "homern";
-//const char* password = "digitalheerocismystandardpassword";
-
 /////////////////////////////////////////////////
 // Function prototypes
 
-//void setupWIfi();
 void callbackMQTT(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
 void checkDistance();
@@ -174,7 +142,7 @@ void handleStatus();
 #define GREEN_LED 12
 
 
-boolean rebooted = false;
+boolean rebooted = true;
 boolean needToPublishWifiConnect = false;
 boolean needToPublishMQTTConnect = false;
 
@@ -238,7 +206,6 @@ class IpPrinter : public Print {
     IpPrinter() { memset(ipv4, '\0', sizeof(ipv4)); }
     
     virtual size_t write(uint8_t v) {
-//      Serial.print("called write: "); Serial.println(v);
       if( count < (sizeof(ipv4)-1) ) {
         ipv4[count++] = v;
       }
@@ -449,9 +416,8 @@ void handleStatus() {
   // doesn't show up here either.
   String doorStatus = String( (confirmedDoorOpen?"Door open":"Door closed") );
 
-  String content = String( "{ response: 'success', doorStatus: '") + doorStatus + 
-    "', rebooted: " + (rebooted?"true":"false") + 
-    //", doorOpen: " + (distanceInfo.doorOpen?"true":"false") +
+  String content = String( "{ response: 'success', doorStatus: '") + doorStatus +
+    "', rebooted: " + (rebooted?"true":"false") +
     ", distance: " + (distanceInfo.distance) +
     "}";
   
@@ -607,14 +573,6 @@ void setup()
   pinMode(BLUE_LED, OUTPUT);
   digitalWrite(BLUE_LED, LOW);
 
-  
-  // TODO Pin setup for status LEDs
-//  pinMode(GREEN_LIGHT_PIN, OUTPUT);
-//  pinMode(RED_LIGHT_PIN, OUTPUT);
-//  
-//  digitalWrite(GREEN_LIGHT_PIN, LOW);
-//  digitalWrite(RED_LIGHT_PIN, LOW);
- 
   // Start up the laser distance sensor
   sensor.init();
   sensor.setTimeout(500);
@@ -652,10 +610,6 @@ void setup()
   // Set up the web server
   server.on("/", handleRoot);
   server.on("/login", handleLogin);
-  
-  /*server.on("/inline", []() {// TOOD Interesting ... review C++ closures again
-    server.send(200, "text/plain", "this works without need of authentification");
-  });*/
 
   server.on("/gui", handleGui);
 
@@ -669,18 +623,14 @@ void setup()
   
   server.onNotFound(handleNotFound);
 
-  // TODO Figure what this is all about
-  //here the list of headers to be recorded
+  // Track the Cookie header so is_authentified() can read it
   const char * headerkeys[] = {"User-Agent","Cookie"} ;
   size_t headerkeyssize = sizeof(headerkeys)/sizeof(char*);
-  
-  //ask server to track these headers
   server.collectHeaders(headerkeys, headerkeyssize );
-  
+
   server.begin();
   Serial.println("HTTP server started");
-  
-  // TODO Re-enable mqtt setup
+
   // MQTT setup
   client.setServer(mqtt_server, 1883);
   client.setCallback(callbackMQTT);
@@ -728,15 +678,6 @@ long lastPoll=0;
 
 void loop()
 {
-  // Find equivalent wifimanager way of doing things
-  
-//  if (WiFi.status() != WL_CONNECTED) {
-//    needToPublishWifiConnect = true;
-//    Serial.println("Reconnecting");
-//    setupWifi(); // TODO Need to do equivalent thing with WifiManager
-//    return; // the guy i copied this from said this was was necessary to avoid resets
-//  }
-
   // Handle http stuff
   server.handleClient();
   
@@ -777,31 +718,6 @@ void loop()
   ArduinoOTA.handle();
   
 }
-
-//void setupWifi()
-//{
-//  WiFi.begin(ssid, password);
-//  delay(10);
-//  
-//  // Wait for connection
-//  while (WiFi.status() != WL_CONNECTED) {
-//    Serial.print(".");
-//    delay(500);
-//  }
-//
-//  Serial.println("\nWifi reconnected");
-//  
-//  Serial.println("");
-//  Serial.print("Connected to ");
-//  Serial.println(ssid);
-//  Serial.print("IP address: ");
-//  Serial.println(WiFi.localIP());
-//
-//  Serial.print("Connected to ");
-//  Serial.println(ssid);
-//  Serial.print("IP address: ");
-//  Serial.println(WiFi.localIP()); 
-//}
 
 void callbackMQTT(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
