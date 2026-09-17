@@ -1,44 +1,17 @@
 /*
- * TODO 
- * Description of the wifi laser project
- * Updating to handle not being able t oconnect to mqtt
- * Ability to reconfigure the system using a web interface
- * ~Ability to use https instead of http
- * 
- * 1/20/2018
- * I started with the VL530L0X single single measurement exmaple to make my distance from the garage wall to  the call bumper indicator.
- * This firmware uses an esp8266 to read from the VL530l0X time of flight laser distance sensor.
- * It does a measurement every 200ms (configurable) and lights a green light if the distance is too far. 
- * A gree nlight is lit when the distance is less than or equal to to a configurable distance.
- * 
- * TODO
- * Make the red/green light indication smarter by having a range of values for green.
- * It should go from red to green when the car bumper is just clear of the garage door.
- * It should stay green until a minimum distance to the wall is reached. At that point the light should go back to red.
- * 
- */
- 
-/* This example shows how to get single-shot range
- measurements from the VL53L0X. The sensor can optionally be
- configured with different ranging profiles, as described in
- the VL53L0X API user manual, to get better performance for
- a certain application. This code is based on the four
- "SingleRanging" examples in the VL53L0X API.
-
- The range readings are in units of mm. */
-
-// On 5/27/2018 I was able to OTA program the device with
-// python.exe C:\Users\Dale\AppData\Local\Arduino15\packages\esp8266\hardware\esp8266\2.4.0-rc1/tools/espota.py -i 192.168.0.157 -p 8266 --auth= -f C:\Users\Dale\AppData\Local\Temp\arduino_build_548805/GarageOpenerWifiLaser.ino.bin 
-// I cannot get it to show up up in the Araduino list of ports however
-// The device also went into a continuous reboot cycle after the OTA flash but a power cycle fixed that
-
-/*
- * TODO
- * 
- * Web interface to configure parameters (mqtt server, etc.)
+ * Garage door opener/monitor firmware for a bare ESP-12E module.
+ *
+ * A VL53L0X time-of-flight distance sensor measures the gap between a
+ * fixed point (e.g. the back wall) and the car bumper to infer whether
+ * the garage door is open or closed. Status is published over MQTT and
+ * shown on a small authenticated web UI (/gui), which also has a button
+ * to trigger the door relay; the relay can also be triggered via an MQTT
+ * command. WiFi credentials are provisioned with WiFiManager, and
+ * firmware can be updated either over serial or over WiFi (ArduinoOTA).
+ *
+ * See README.md for hardware details and build/flash instructions.
  */
 
- 
 #include <Arduino.h>
 
 // WIFIManager
