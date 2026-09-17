@@ -369,28 +369,89 @@ void handleGui() {
   // Should contain display of garage door status open or closed
   // Should show button to push the garage door button
   // Should constantly poll for the status of the open/close switches
-  //   Do this with JS as was done previously
-  //   May want to minify the JS
 
-  // Used http://jscompress.com/ to minify the original gg.js
- 
-  String content = "<html><head>";
-  content += "<script language='JavaScript' src='http://192.168.0.4/garagegui/gg.js'></script>";
-  //content += "<script language='JavaScript'>";
-  //content += "function refresh(){setTimeout('refresh()',1e3*refreshrate),isRefreshing||checkStatus()}function callServer(e,t,s){var r;r=window.XMLHttpRequest?new XMLHttpRequest:new ActiveXObject('Microsoft.XMLHTTP'),r.onreadystatechange=function(){s(r)},r.open('POST',e,!0),r.setRequestHeader('Content-Type','application/x-www-form-urlencoded'),r.send(t)}function pushButton(){var callback=function(xmlhttp){if(4==xmlhttp.readyState&&200==xmlhttp.status)var result=eval('('+xmlhttp.responseText+')')},url='/button',params='';callServer(url,params,callback)}function checkStatus(){var callback=function(xmlhttp){if(4==xmlhttp.readyState&&200==xmlhttp.status){var result=eval('('+xmlhttp.responseText+')');updateStatus(result),isRefreshing=!1;var endRefreshDate=new Date,elapsed=endRefreshDate-startRefreshDate,el=document.getElementById('elapsed');el&&(el.innerHTML='millis:'+elapsed)}},url='/status',params='';isRefreshing=!0,startRefreshDate=new Date,callServer(url,params,callback)}function updateStatus(e){var t=document.getElementById('doorStatus');e.response&&'success'==e.response?t.innerHTML=e.status:t.innerHTML='Error getting status'+e.response}var refreshrate=5,isRefreshing=!1,startRefreshTime;refresh();";
-  //content += "</script>";
-  content += "</head><body>";
-  content += "<span style='background: grey; display: inline-block; padding: 25px'>";
-  content += "<div><span id='doorStatus' style='background: green'/></div>";
-  content += "<div><span id='distance' style='font-size:small; text-align:center'/></div>";
-  content += "<div><span id='elapsed' style='font-size:small; text-align:center'/></div>";
-  content += "<br/><br/>";
-  content += "<input type='button' id='openClose' value='Open/Close Door' onClick='pushButton()'/>";
-  content += "</span>";
+  String content = R"HTML(<!DOCTYPE html>
+<html><head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Garage Door</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; background:#f2f2f2; display:flex; justify-content:center; align-items:center; min-height:100vh; padding:16px; }
+  .card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,0.15); padding:24px; width:100%; max-width:380px; text-align:center; }
+  h1 { font-size:1.3rem; margin:0 0 16px; color:#333; }
+  #doorStatus { display:inline-block; padding:10px 20px; border-radius:20px; font-size:1.1rem; font-weight:bold; color:#fff; background:#999; }
+  #doorStatus.open { background:#e74c3c; }
+  #doorStatus.closed { background:#2ecc71; }
+  #distance { display:block; margin-top:12px; color:#666; font-size:0.95rem; min-height:1.2em; }
+  #openClose { margin-top:24px; width:100%; padding:16px; font-size:1.1rem; border:none; border-radius:8px; background:#2d7ff9; color:#fff; cursor:pointer; }
+  #openClose:active { background:#1a5fd0; }
+  #elapsed { display:block; margin-top:16px; color:#bbb; font-size:0.75rem; min-height:1em; }
+</style>
+<script type='text/javascript'>
+var refreshRate=5;
+var isRefreshing=false;
 
-  content += "</body>";
-  content += "</html>";
-  
+function refresh(){
+  setTimeout(refresh,1000*refreshRate);
+  if(!isRefreshing){checkStatus();}
+}
+
+function callServer(url,params,callback){
+  var xmlhttp=window.XMLHttpRequest?new XMLHttpRequest():new ActiveXObject('Microsoft.XMLHTTP');
+  xmlhttp.onreadystatechange=function(){callback(xmlhttp);};
+  xmlhttp.open('POST',url,true);
+  xmlhttp.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+  xmlhttp.send(params);
+}
+
+function pushButton(){
+  callServer('/button','',function(xmlhttp){
+    if(xmlhttp.readyState==4&&xmlhttp.status==200){
+      updateStatus(eval('('+xmlhttp.responseText+')'));
+    }
+  });
+}
+
+function checkStatus(){
+  isRefreshing=true;
+  var startTime=new Date();
+  callServer('/status','',function(xmlhttp){
+    if(xmlhttp.readyState==4&&xmlhttp.status==200){
+      updateStatus(eval('('+xmlhttp.responseText+')'));
+      isRefreshing=false;
+      var elapsedEl=document.getElementById('elapsed');
+      if(elapsedEl){elapsedEl.textContent='millis: '+(new Date()-startTime);}
+    }
+  });
+}
+
+function updateStatus(result){
+  var statusEl=document.getElementById('doorStatus');
+  var distanceEl=document.getElementById('distance');
+  if(result.response=='success'){
+    statusEl.textContent=result.doorStatus;
+    statusEl.className=(result.doorStatus=='Door open')?'open':'closed';
+    if(distanceEl){distanceEl.textContent='Distance: '+result.distance+' mm';}
+  } else {
+    statusEl.textContent='Error getting status';
+    statusEl.className='';
+  }
+}
+
+refresh();
+</script>
+</head><body>
+<div class='card'>
+<h1>Garage Door</h1>
+<span id='doorStatus'>Loading...</span>
+<span id='distance'></span>
+<input type='button' id='openClose' value='Open / Close Door' onclick='pushButton()'/>
+<span id='elapsed'></span>
+</div>
+</body></html>
+)HTML";
+
   server.send(200, "text/html", content);
 }
 
@@ -473,7 +534,7 @@ void handleLogin(){
 
   if (!is_authentified()) {
     if (server.hasArg("username") && server.hasArg("password")) {
-      msg = "Wrong username/password! try again.";
+      msg = "<div class='error'>Wrong username or password. Try again.</div>";
     }
   }
   else {
@@ -486,12 +547,37 @@ void handleLogin(){
       Serial.println("Log in Successful");
       return;
   }
-  
-  String content = "<html><body><form action='/login' method='POST'>";
-  content += "User:<input type='text' name='username'/><br>";
-  content += "Password:<input type='password' name='password'/><br>";
-  content += "<input type='submit' name='login' value='Login'/></form>" + msg + "<br>";
-  content += "</body></html>";
+
+  String content = R"HTML(<!DOCTYPE html>
+<html><head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Garage Opener Login</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; background:#f2f2f2; display:flex; justify-content:center; align-items:center; min-height:100vh; padding:16px; }
+  .card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,0.15); padding:24px; width:100%; max-width:320px; }
+  h1 { font-size:1.2rem; margin:0 0 16px; text-align:center; color:#333; }
+  label { display:block; margin-bottom:4px; font-size:0.9rem; color:#666; }
+  input[type=text],input[type=password] { width:100%; padding:10px; margin-bottom:16px; border:1px solid #ccc; border-radius:6px; font-size:1rem; }
+  input[type=submit] { width:100%; padding:12px; border:none; border-radius:8px; background:#2d7ff9; color:#fff; font-size:1rem; cursor:pointer; }
+  .error { color:#e74c3c; font-size:0.9rem; text-align:center; margin-top:12px; }
+</style>
+</head><body>
+<div class='card'>
+<h1>Garage Opener Login</h1>
+<form action='/login' method='POST'>
+<label>Username</label>
+<input type='text' name='username'/>
+<label>Password</label>
+<input type='password' name='password'/>
+<input type='submit' name='login' value='Login'/>
+</form>
+)HTML" + msg + R"HTML(
+</div>
+</body></html>
+)HTML";
+
   server.send(200, "text/html", content);
 }
 
