@@ -45,7 +45,9 @@ VL53L0X sensor;
 #define STATUS_TOPIC "/myhouse/garage/opener/status"
 #define COMMAND_TOPIC "/myhouse/garage/opener/commands"
 
-const char* mqtt_server = "192.168.1.4";
+// Initial/default value for config.mqttServer the very first time the
+// device boots; editable afterward via the /config page.
+#define DEFAULT_MQTT_SERVER "192.168.1.4"
 
 #define MQTT_CLIENT_ID "GarageOpener_v3"
 
@@ -88,7 +90,7 @@ PubSubClient client(espClient);
 
 // Bump this if the Config struct layout changes, so old/incompatible data
 // in flash gets replaced with defaults instead of being misread.
-#define CONFIG_MAGIC 0xC0FFEE02
+#define CONFIG_MAGIC 0xC0FFEE03
 
 struct Config {
   uint32_t magic;
@@ -98,6 +100,7 @@ struct Config {
   int distChangePercent;
   long sensorOutOfRangeMm;
   int doorStateConfirmCount;
+  char mqttServer[64];
 };
 
 Config config;
@@ -120,6 +123,7 @@ void loadConfig() {
     config.distChangePercent = DEFAULT_DIST_CHANGE_PERCENT;
     config.sensorOutOfRangeMm = DEFAULT_SENSOR_OUT_OF_RANGE_MM;
     config.doorStateConfirmCount = DEFAULT_DOOR_STATE_CONFIRM_COUNT;
+    snprintf(config.mqttServer, sizeof(config.mqttServer), "%s", DEFAULT_MQTT_SERVER);
     saveConfig();
   }
 }
@@ -487,6 +491,7 @@ void handleConfig() {
 
   String message;
   if (server.method() == HTTP_POST) {
+    snprintf(config.mqttServer, sizeof(config.mqttServer), "%s", server.arg("mqttServer").c_str());
     config.doorOpenMinDist = server.arg("doorOpenMinDist").toInt();
     config.distCheckInterval = server.arg("distCheckInterval").toInt();
     config.statusResendInterval = server.arg("statusResendInterval").toInt();
@@ -494,6 +499,15 @@ void handleConfig() {
     config.sensorOutOfRangeMm = server.arg("sensorOutOfRangeMm").toInt();
     config.doorStateConfirmCount = server.arg("doorStateConfirmCount").toInt();
     saveConfig();
+
+    // Point the MQTT client at the (possibly new) server and drop any
+    // existing connection so loop()'s reconnect logic picks up the change
+    // right away instead of waiting for a reboot.
+    client.setServer(config.mqttServer, 1883);
+    if( client.connected() ) {
+      client.disconnect();
+    }
+
     message = "<div class='success'>Settings saved.</div>";
   }
 
@@ -509,7 +523,7 @@ void handleConfig() {
   .card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,0.15); padding:24px; width:100%; max-width:420px; }
   h1 { font-size:1.2rem; margin:0 0 16px; text-align:center; color:#333; }
   label { display:block; margin-top:14px; margin-bottom:4px; font-size:0.85rem; color:#666; }
-  input[type=number] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:1rem; }
+  input[type=number],input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:1rem; }
   input[type=submit] { margin-top:20px; width:100%; padding:12px; border:none; border-radius:8px; background:#2d7ff9; color:#fff; font-size:1rem; cursor:pointer; }
   .success { color:#2ecc71; font-size:0.9rem; text-align:center; margin-top:12px; }
   .hint { font-size:0.75rem; color:#999; margin-top:2px; }
@@ -520,6 +534,10 @@ void handleConfig() {
 <div class='card'>
 <h1>Configuration</h1>
 <form action='/config' method='POST'>
+<label>MQTT server (IP or hostname)</label>
+<input type='text' name='mqttServer' maxlength='63' value=')HTML" + String(config.mqttServer) + R"HTML('/>
+<div class='hint'>Broker the device publishes status to and listens for commands on.</div>
+
 <label>Door open threshold (mm)</label>
 <input type='number' name='doorOpenMinDist' value=')HTML" + String(config.doorOpenMinDist) + R"HTML('/>
 <div class='hint'>Distance below which the door is considered open.</div>
@@ -809,7 +827,7 @@ void setup()
   Serial.println("HTTP server started");
 
   // MQTT setup
-  client.setServer(mqtt_server, 1883);
+  client.setServer(config.mqttServer, 1883);
   client.setCallback(callbackMQTT);
 
   needToPublishWifiConnect = true;

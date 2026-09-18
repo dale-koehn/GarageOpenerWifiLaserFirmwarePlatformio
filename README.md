@@ -109,17 +109,19 @@ picker for available serial ports).
 
 ## Configuration
 
-Sensor/door-detection tuning (door-open distance threshold, poll interval,
-MQTT resend interval, change-percent threshold, sensor out-of-range
-threshold, and door-state confirm count) is editable at runtime on the
-`/config` page and stored in flash (EEPROM), so it survives reboots and
-reflashes. The `DEFAULT_*` `#define`s near the top of
-`src/GarageOpenerWifiLaser.cpp` only supply the very first values written
-to flash — after that, `/config` is the source of truth.
+The MQTT server address and sensor/door-detection tuning (door-open
+distance threshold, poll interval, MQTT resend interval, change-percent
+threshold, sensor out-of-range threshold, and door-state confirm count)
+are all editable at runtime on the `/config` page and stored in flash
+(EEPROM), so changes survive reboots and reflashes and take effect
+immediately (no reboot required, including MQTT server changes — the
+client drops and reconnects to the new broker right away). The
+`DEFAULT_*` `#define`s near the top of `src/GarageOpenerWifiLaser.cpp`
+only supply the very first values written to flash — after that,
+`/config` is the source of truth.
 
 A few other values are set as constants at the top of
 `src/GarageOpenerWifiLaser.cpp` and may need adjusting for your setup:
 
-- `mqtt_server` — IP address of your MQTT broker.
 - `webUser` / `webPass` — credentials for the web UI (`/gui`, `/config`,
   `/status`, `/button`).
