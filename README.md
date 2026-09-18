@@ -8,7 +8,9 @@ ESP-12E module. It:
   infers whether the garage door is open or closed from that distance.
 - Publishes distance and door-open/closed status over MQTT.
 - Exposes a small authenticated web UI (`/gui`) showing live status and a
-  button to trigger the garage door relay.
+  button to trigger the garage door relay, plus a `/config` page for tuning
+  the sensor/door-detection behavior (values are stored in flash and
+  persist across reboots).
 - Can trigger the door relay either from the web UI or via an MQTT command.
 - Uses [WiFiManager](https://github.com/tzapu/WiFiManager) for WiFi
   provisioning (connect to the `GarageOpener` AP to configure WiFi
@@ -81,13 +83,43 @@ Note: OTA is currently configured with no password
 (`ArduinoOTA.setPassword` is intentionally left disabled), so anyone on
 the local network can push firmware to the device.
 
+## Using deploy.ps1
+
+`deploy.ps1` is a PowerShell wrapper around the `pio` commands above, so
+you don't have to remember environment names and upload-port flags.
+
+Run it with no arguments for an interactive menu (build / flash via
+serial / flash via OTA / monitor):
+
+```
+.\deploy.ps1
+```
+
+Or drive it non-interactively with switches:
+
+```
+.\deploy.ps1 -Build
+.\deploy.ps1 -FlashSerial -Port COM8
+.\deploy.ps1 -FlashOTA -IPAddress 192.168.1.90
+.\deploy.ps1 -Monitor -Port COM8
+```
+
+`-Port`/`-IPAddress` are optional — if omitted, it'll prompt (with a
+picker for available serial ports).
+
 ## Configuration
 
-A few values are set as constants at the top of
+Sensor/door-detection tuning (door-open distance threshold, poll interval,
+MQTT resend interval, change-percent threshold, sensor out-of-range
+threshold, and door-state confirm count) is editable at runtime on the
+`/config` page and stored in flash (EEPROM), so it survives reboots and
+reflashes. The `DEFAULT_*` `#define`s near the top of
+`src/GarageOpenerWifiLaser.cpp` only supply the very first values written
+to flash — after that, `/config` is the source of truth.
+
+A few other values are set as constants at the top of
 `src/GarageOpenerWifiLaser.cpp` and may need adjusting for your setup:
 
 - `mqtt_server` — IP address of your MQTT broker.
-- `DOOR_OPEN_MIN_DIST` — distance (mm) below which the door is considered
-  open.
-- `webUser` / `webPass` — credentials for the web UI (`/gui`, `/status`,
-  `/button`).
+- `webUser` / `webPass` — credentials for the web UI (`/gui`, `/config`,
+  `/status`, `/button`).

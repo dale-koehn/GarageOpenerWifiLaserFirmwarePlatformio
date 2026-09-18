@@ -33,6 +33,7 @@
 
 #include <Wire.h>
 #include <VL53L0X.h>
+#include <EEPROM.h>
 
 
 // For the distance sensor
@@ -52,30 +53,76 @@ const char* mqtt_server = "192.168.1.4";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+// The six values below control device behavior and are editable at runtime
+// via the /config web page; they're stored in flash (see Config/EEPROM
+// below) and these #defines only supply the initial/default values the very
+// first time the device boots (or after a flash layout change).
+
 // This is set to some distance greater than dist to the door when it's open
 // It should not be so high that something under the door could be detected closer (like a car)
 // In millimeters
-#define DOOR_OPEN_MIN_DIST 400
+#define DEFAULT_DOOR_OPEN_MIN_DIST 500
 
 // Time in ms to wait between distance checks
-#define DIST_CHECK_INTERVAL 1000
+#define DEFAULT_DIST_CHECK_INTERVAL 1000
 
 // Time in ms to periodically resend door/distance status messages (even if nothing changed)
-// This time should be greater/or equal to DIST_CHECK_INTERVAL
-#define STATUS_RESEND_INTERVAL 60000
+// This time should be greater/or equal to DEFAULT_DIST_CHECK_INTERVAL
+#define DEFAULT_STATUS_RESEND_INTERVAL 60000
 
 // Distance change in percent before it's considered a change
-#define DIST_CHANGE_PERCENT 10
+#define DEFAULT_DIST_CHANGE_PERCENT 10
 
 // The VL53L0X reports a distance around this value (well beyond any real
 // distance in this application) when it can't find a valid target. Treat
 // readings at or above this as invalid rather than as a real "far" distance.
-#define SENSOR_OUT_OF_RANGE_MM 8000
+#define DEFAULT_SENSOR_OUT_OF_RANGE_MM 8000
 
 // Number of consecutive readings (agreeing with each other) required before
 // the reported door open/closed state is changed. Filters out single errant
 // readings without needing to average/median-filter every sample.
-#define DOOR_STATE_CONFIRM_COUNT 3
+#define DEFAULT_DOOR_STATE_CONFIRM_COUNT 3
+
+/////////////////////////////////////////////////
+// Runtime-configurable settings, stored in flash (EEPROM)
+
+// Bump this if the Config struct layout changes, so old/incompatible data
+// in flash gets replaced with defaults instead of being misread.
+#define CONFIG_MAGIC 0xC0FFEE02
+
+struct Config {
+  uint32_t magic;
+  long doorOpenMinDist;
+  unsigned long distCheckInterval;
+  unsigned long statusResendInterval;
+  int distChangePercent;
+  long sensorOutOfRangeMm;
+  int doorStateConfirmCount;
+};
+
+Config config;
+
+void saveConfig() {
+  EEPROM.put(0, config);
+  EEPROM.commit();
+}
+
+void loadConfig() {
+  EEPROM.begin(sizeof(Config));
+  EEPROM.get(0, config);
+
+  if( config.magic != CONFIG_MAGIC ) {
+    Serial.println("No valid config found in flash, writing defaults");
+    config.magic = CONFIG_MAGIC;
+    config.doorOpenMinDist = DEFAULT_DOOR_OPEN_MIN_DIST;
+    config.distCheckInterval = DEFAULT_DIST_CHECK_INTERVAL;
+    config.statusResendInterval = DEFAULT_STATUS_RESEND_INTERVAL;
+    config.distChangePercent = DEFAULT_DIST_CHANGE_PERCENT;
+    config.sensorOutOfRangeMm = DEFAULT_SENSOR_OUT_OF_RANGE_MM;
+    config.doorStateConfirmCount = DEFAULT_DOOR_STATE_CONFIRM_COUNT;
+    saveConfig();
+  }
+}
 
 
 /////////////////////////////////////////////////
@@ -150,7 +197,7 @@ long lastDistanceCheck=0;
 long lastStatusSend=0;
 long lastDistance=0;
 
-// The last door state that has been confirmed (via DOOR_STATE_CONFIRM_COUNT
+// The last door state that has been confirmed (via config.doorStateConfirmCount
 // consecutive agreeing readings) and is safe to report/act on.
 bool confirmedDoorOpen = false;
 bool pendingDoorOpen = false;
@@ -174,23 +221,24 @@ class DistanceInfo {
         bool timeout = sensor.timeoutOccurred();
         if( timeout ) {
             Serial.print(" TIMEOUT");
+            return false;
         }
 
-        bool outOfRange = (dist >= SENSOR_OUT_OF_RANGE_MM);
+        bool outOfRange = (dist >= config.sensorOutOfRangeMm);
         if( outOfRange ) {
             Serial.print(" OUT OF RANGE");
         }
 
         bool valid = !timeout && !outOfRange;
-
+        
         if( valid ) {
-            distance = dist;
+          distance = dist;
         }
         else {
-            distance = -1;
+            distance = 10000;
         }
 
-        doorOpen = (distance<DOOR_OPEN_MIN_DIST);
+        doorOpen = (distance<config.doorOpenMinDist);
 
         return valid;
     }
@@ -222,6 +270,29 @@ class IpPrinter : public Print {
 
     char * getIpv4() { return ipv4; };
 };
+
+// CSS shared by every authenticated page's top navigation bar.
+const char* NAV_BAR_CSS =
+  ".navbar { display:flex; align-items:center; gap:16px; background:#222; padding:12px 20px; }"
+  ".navbar a { color:#ccc; text-decoration:none; font-size:0.95rem; }"
+  ".navbar a.active { color:#fff; font-weight:bold; }"
+  ".navbar a.logout { margin-left:auto; color:#e74c3c; }"
+  ".content { display:flex; justify-content:center; align-items:flex-start; padding:24px 16px; }";
+
+// Renders the top nav bar shown on every authenticated page, highlighting
+// whichever page (by id: "gui" or "config") is currently active.
+String renderNavBar(const char* activePage) {
+  String nav = "<nav class='navbar'>";
+  nav += "<a href='/gui' class='";
+  nav += (strcmp(activePage, "gui") == 0) ? "active" : "";
+  nav += "'>Monitor</a>";
+  nav += "<a href='/config' class='";
+  nav += (strcmp(activePage, "config") == 0) ? "active" : "";
+  nav += "'>Config</a>";
+  nav += "<a href='/logout' class='logout'>Logout</a>";
+  nav += "</nav>";
+  return nav;
+}
 
 /////////////////////////////////////////////////
 // Handlers for web calls
@@ -317,7 +388,8 @@ void handleGui() {
 <title>Garage Door</title>
 <style>
   * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; background:#f2f2f2; display:flex; justify-content:center; align-items:center; min-height:100vh; padding:16px; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; background:#f2f2f2; min-height:100vh; }
+  )HTML" + String(NAV_BAR_CSS) + R"HTML(
   .card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,0.15); padding:24px; width:100%; max-width:380px; text-align:center; }
   h1 { font-size:1.3rem; margin:0 0 16px; color:#333; }
   #doorStatus { display:inline-block; padding:10px 20px; border-radius:20px; font-size:1.1rem; font-weight:bold; color:#fff; background:#999; }
@@ -382,6 +454,8 @@ function updateStatus(result){
 refresh();
 </script>
 </head><body>
+)HTML" + renderNavBar("gui") + R"HTML(
+<div class='content'>
 <div class='card'>
 <h1>Garage Door</h1>
 <span id='doorStatus'>Loading...</span>
@@ -389,10 +463,107 @@ refresh();
 <input type='button' id='openClose' value='Open / Close Door' onclick='pushButton()'/>
 <span id='elapsed'></span>
 </div>
+</div>
 </body></html>
 )HTML";
 
   server.send(200, "text/html", content);
+}
+
+/*
+ * Settings page: lets the six behavior-tuning values (normally seeded from
+ * the DEFAULT_* defines) be viewed and changed at runtime. Changes are
+ * written to flash immediately so they survive a reboot.
+ */
+void handleConfig() {
+  if (!is_authentified()) {
+      // Redirect to login url
+      String header = "HTTP/1.1 301 OK\r\n";
+      header += "Location: /login\r\n";
+      header += "Cache-Control: no-cache\r\n\r\n";
+      server.sendContent(header);
+      return;
+  }
+
+  String message;
+  if (server.method() == HTTP_POST) {
+    config.doorOpenMinDist = server.arg("doorOpenMinDist").toInt();
+    config.distCheckInterval = server.arg("distCheckInterval").toInt();
+    config.statusResendInterval = server.arg("statusResendInterval").toInt();
+    config.distChangePercent = server.arg("distChangePercent").toInt();
+    config.sensorOutOfRangeMm = server.arg("sensorOutOfRangeMm").toInt();
+    config.doorStateConfirmCount = server.arg("doorStateConfirmCount").toInt();
+    saveConfig();
+    message = "<div class='success'>Settings saved.</div>";
+  }
+
+  String content = R"HTML(<!DOCTYPE html>
+<html><head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Garage Opener Config</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; background:#f2f2f2; min-height:100vh; }
+  )HTML" + String(NAV_BAR_CSS) + R"HTML(
+  .card { background:#fff; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,0.15); padding:24px; width:100%; max-width:420px; }
+  h1 { font-size:1.2rem; margin:0 0 16px; text-align:center; color:#333; }
+  label { display:block; margin-top:14px; margin-bottom:4px; font-size:0.85rem; color:#666; }
+  input[type=number] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:1rem; }
+  input[type=submit] { margin-top:20px; width:100%; padding:12px; border:none; border-radius:8px; background:#2d7ff9; color:#fff; font-size:1rem; cursor:pointer; }
+  .success { color:#2ecc71; font-size:0.9rem; text-align:center; margin-top:12px; }
+  .hint { font-size:0.75rem; color:#999; margin-top:2px; }
+</style>
+</head><body>
+)HTML" + renderNavBar("config") + R"HTML(
+<div class='content'>
+<div class='card'>
+<h1>Configuration</h1>
+<form action='/config' method='POST'>
+<label>Door open threshold (mm)</label>
+<input type='number' name='doorOpenMinDist' value=')HTML" + String(config.doorOpenMinDist) + R"HTML('/>
+<div class='hint'>Distance below which the door is considered open.</div>
+
+<label>Distance check interval (ms)</label>
+<input type='number' name='distCheckInterval' value=')HTML" + String(config.distCheckInterval) + R"HTML('/>
+<div class='hint'>How often the sensor is polled.</div>
+
+<label>Status resend interval (ms)</label>
+<input type='number' name='statusResendInterval' value=')HTML" + String(config.statusResendInterval) + R"HTML('/>
+<div class='hint'>How often status is republished over MQTT even if unchanged.</div>
+
+<label>Distance change threshold (%)</label>
+<input type='number' name='distChangePercent' value=')HTML" + String(config.distChangePercent) + R"HTML('/>
+<div class='hint'>Minimum distance change to trigger an MQTT update.</div>
+
+<label>Sensor out-of-range threshold (mm)</label>
+<input type='number' name='sensorOutOfRangeMm' value=')HTML" + String(config.sensorOutOfRangeMm) + R"HTML('/>
+<div class='hint'>Readings at or above this are treated as invalid.</div>
+
+<label>Door state confirm count</label>
+<input type='number' name='doorStateConfirmCount' value=')HTML" + String(config.doorStateConfirmCount) + R"HTML('/>
+<div class='hint'>Consecutive agreeing readings required before the reported door state changes.</div>
+
+<input type='submit' value='Save'/>
+</form>
+)HTML" + message + R"HTML(
+</div>
+</div>
+</body></html>
+)HTML";
+
+  server.send(200, "text/html", content);
+}
+
+/*
+ * Clears the auth cookie and sends the browser back to the login page.
+ */
+void handleLogout() {
+  String header = "HTTP/1.1 301 OK\r\n";
+  header += "Set-Cookie: login=; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\n";
+  header += "Location: /login\r\n";
+  header += "Cache-Control: no-cache\r\n\r\n";
+  server.sendContent(header);
 }
 
 
@@ -559,7 +730,9 @@ void setup()
   Wire.begin(4, 5); // Per https://blog.squix.org/2017/04/esp8266-peripherie-cjmcu-530-tof-distance-sensor.html
 
   Serial.println("Garage opener starting up");
-  
+
+  loadConfig();
+
   // Relay output (button)
   pinMode(BUTTON, OUTPUT);
   digitalWrite(BUTTON, LOW);
@@ -613,8 +786,12 @@ void setup()
 
   server.on("/gui", handleGui);
 
+  server.on("/config", handleConfig);
+
+  server.on("/logout", handleLogout);
+
   server.on("/status", handleStatus);
-  
+
   server.on("/button", handleButton);
 
   server.on("/resetrebootflag", handleResetRebootFlag);
@@ -764,7 +941,7 @@ void reconnectMQTT() {
 }
 
 void checkDistance() {
-  if( (millis() - lastDistanceCheck) >= DIST_CHECK_INTERVAL ) {
+  if( (millis() - lastDistanceCheck) >= config.distCheckInterval ) {
     DistanceInfo distanceInfo;
 
     if( distanceInfo.calcDistance() ) {
@@ -781,7 +958,7 @@ void checkDistance() {
           pendingDoorOpenCount = 1;
         }
 
-        if( pendingDoorOpenCount >= DOOR_STATE_CONFIRM_COUNT ) {
+        if( pendingDoorOpenCount >= config.doorStateConfirmCount ) {
           confirmedDoorOpen = pendingDoorOpen;
           pendingDoorOpenCount = 0;
         }
@@ -793,13 +970,13 @@ void checkDistance() {
       digitalWrite(BLUE_LED, confirmedDoorOpen ? HIGH : LOW);
 
       // Send status messages if distance has changed by the defined percent
-      if( lastDistance==0 || abs( ((float)(distanceInfo.distance-lastDistance))/lastDistance )*100 >= DIST_CHANGE_PERCENT ) {
+      if( lastDistance==0 || abs( ((float)(distanceInfo.distance-lastDistance))/lastDistance )*100 >= config.distChangePercent ) {
         sendMsg = true;
         lastDistance = distanceInfo.distance;
       }
 
       // Periodically send messages even if percent distance has not changed enough
-      else if( (millis() - lastStatusSend) >= STATUS_RESEND_INTERVAL ) {
+      else if( (millis() - lastStatusSend) >= config.statusResendInterval ) {
         sendMsg = true;
       }
 
