@@ -214,9 +214,9 @@ class DistanceInfo {
     long distance=0;
     bool doorOpen=false;
 
-    // Returns false if the reading should be discarded (sensor timeout or
-    // an out-of-range "no target" reading), in which case distance/doorOpen
-    // are not meaningful and should not be used.
+    // Returns false if the reading should be discarded (sensor timeout,
+    // meaning no distance could be read at all), in which case
+    // distance/doorOpen are not meaningful and should not be used.
     bool calcDistance() {
         int dist = sensor.readRangeSingleMillimeters();
         Serial.print("Distance: ");
@@ -230,21 +230,20 @@ class DistanceInfo {
 
         bool outOfRange = (dist >= config.sensorOutOfRangeMm);
         if( outOfRange ) {
+            // No target detected within range. With the sensor aimed at
+            // the floor under the door, this happens when the door is
+            // down, so it's a legitimate "far" reading (door closed) -
+            // not an error to discard, unlike a timeout.
             Serial.print(" OUT OF RANGE");
-        }
-
-        bool valid = !timeout && !outOfRange;
-        
-        if( valid ) {
-          distance = dist;
+            distance = 10000;
         }
         else {
-            distance = 10000;
+            distance = dist;
         }
 
         doorOpen = (distance<config.doorOpenMinDist);
 
-        return valid;
+        return true;
     }
 };
 
