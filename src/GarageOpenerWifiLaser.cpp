@@ -45,6 +45,17 @@ VL53L0X sensor;
 #define STATUS_TOPIC "/myhouse/garage/opener/status"
 #define COMMAND_TOPIC "/myhouse/garage/opener/commands"
 
+// Home Assistant topics. State and availability are published retained so
+// Home Assistant has a value immediately after it (re)starts.
+#define DOOR_TOPIC "/myhouse/garage/opener/door"           // "open" or "closed"
+#define DISTANCE_TOPIC "/myhouse/garage/opener/distance"   // raw reading in mm
+#define AVAILABILITY_TOPIC "/myhouse/garage/opener/availability" // "online"/"offline"
+
+// MQTT discovery. The unique ids and device identifier below must never
+// change, or Home Assistant will treat the unit as a new device.
+#define DISCOVERY_PREFIX "homeassistant"
+#define HA_DEVICE_ID "garage_opener_v3"
+
 // Initial/default value for config.mqttServer the very first time the
 // device boots; editable afterward via the /config page.
 #define DEFAULT_MQTT_SERVER "192.168.1.4"
@@ -173,6 +184,8 @@ String validLoginPwCookieValue = String("login=") + webUser + ":" + webPass;
 void callbackMQTT(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
 void checkDistance();
+void publishDiscovery();
+void publishHaState();
 bool is_authentified();
 void handleStatus();
 
@@ -196,6 +209,14 @@ void handleStatus();
 boolean rebooted = true;
 boolean needToPublishWifiConnect = false;
 boolean needToPublishMQTTConnect = false;
+
+// Set whenever the MQTT connection is (re)established so the current state is
+// republished (retained) right away.
+boolean needToPublishHaState = true;
+
+// Most recent values, kept so they can be republished after a reconnect.
+long lastRawDistance = 0;
+bool haStateValid = false;
 
 long lastDistanceCheck=0;
 long lastStatusSend=0;
@@ -784,13 +805,24 @@ void setup()
   sensor.setMeasurementTimingBudget(200000);
 #endif
 
+  // Wi-Fi driver behavior: keep credentials in flash, rejoin automatically
+  // if the link drops, and don't let the radio sleep (more stable on weak
+  // signal). Must be set before connecting.
+  WiFi.persistent(true);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
   // WIFIManager
+  // After a power outage this device often boots before the router is back.
+  // Without timeouts, autoConnect() would sit in the config portal forever.
+  // Give up after a while and reboot so we try the saved network again.
+  wifiManager.setConnectTimeout(20);       // seconds to wait for the saved network
+  wifiManager.setConfigPortalTimeout(120); // seconds the config portal stays up
   if (!wifiManager.autoConnect("GarageOpener", "password")) {
-    Serial.println("failed to connect and hit timeout");
+    Serial.println("failed to connect and hit timeout, restarting to retry");
     delay(3000);
-    
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
+
+    ESP.restart();
     delay(5000);
   }
 
@@ -828,6 +860,7 @@ void setup()
   // MQTT setup
   client.setServer(config.mqttServer, 1883);
   client.setCallback(callbackMQTT);
+  client.setBufferSize(512); // discovery payloads exceed the 256 byte default
 
   needToPublishWifiConnect = true;
 
@@ -870,15 +903,79 @@ void setup()
 // Last time we polled the distance sensor
 long lastPoll=0;
 
+// Wi-Fi watchdog escalation thresholds, measured from when the link was lost.
+#define WIFI_RECONNECT_AFTER_MS   30000UL   // nudge the driver with WiFi.reconnect()
+#define WIFI_FULL_RESET_AFTER_MS  120000UL  // tear down and re-begin the connection
+#define WIFI_REBOOT_AFTER_MS      600000UL  // last resort: restart the chip
+
+// Watches the Wi-Fi link and escalates recovery the longer it stays down.
+// Non-blocking; call every pass through loop().
+void checkWifi() {
+  static bool wasConnected = true;
+  static unsigned long offlineSince = 0;
+  static bool triedReconnect = false;
+  static bool triedFullReset = false;
+
+  if( WiFi.status() == WL_CONNECTED ) {
+    if( !wasConnected ) {
+      Serial.print("Wi-Fi restored after ");
+      Serial.print((millis() - offlineSince) / 1000);
+      Serial.println("s, IP: " + WiFi.localIP().toString());
+      // Re-announce the connection once MQTT is back
+      needToPublishWifiConnect = true;
+      wasConnected = true;
+    }
+    return;
+  }
+
+  // Link is down
+  if( wasConnected ) {
+    Serial.println("Wi-Fi connection lost");
+    wasConnected = false;
+    offlineSince = millis();
+    triedReconnect = false;
+    triedFullReset = false;
+    return;
+  }
+
+  unsigned long offlineFor = millis() - offlineSince;
+
+  if( offlineFor >= WIFI_REBOOT_AFTER_MS ) {
+    Serial.println("Wi-Fi down too long, restarting");
+    delay(100);
+    ESP.restart();
+  }
+  else if( offlineFor >= WIFI_FULL_RESET_AFTER_MS && !triedFullReset ) {
+    Serial.println("Wi-Fi still down, resetting Wi-Fi stack");
+    triedFullReset = true;
+    WiFi.disconnect();
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(); // reuse the saved credentials
+  }
+  else if( offlineFor >= WIFI_RECONNECT_AFTER_MS && !triedReconnect ) {
+    Serial.println("Wi-Fi still down, calling WiFi.reconnect()");
+    triedReconnect = true;
+    WiFi.reconnect();
+  }
+}
+
 void loop()
 {
   // Handle http stuff
   server.handleClient();
-  
-  // Handle reconnecting to MQTT if necessary
+
+  // Supervise the Wi-Fi link
+  checkWifi();
+
+  // Handle reconnecting to MQTT if necessary. Skipped while Wi-Fi is down so
+  // the rest of loop() (web server, OTA, sensing) keeps running.
   if (!client.connected()) {
-    needToPublishMQTTConnect = true;
-    reconnectMQTT();
+    if( WiFi.status() == WL_CONNECTED ) {
+      needToPublishMQTTConnect = true;
+      reconnectMQTT();
+    }
   }
   else {
     if( needToPublishWifiConnect ) {
@@ -934,27 +1031,95 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 
 }
 
-void reconnectMQTT() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    
-    // Attempt to connect
-    if (client.connect(MQTT_CLIENT_ID)) {
-      Serial.println("connected");
-      
-      // ... and resubscribe
-      client.subscribe( COMMAND_TOPIC );
-      
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
+// Publishes one retained Home Assistant discovery config message.
+void publishDiscoveryEntry(const char* component, const char* objectId, const char* body) {
+  char topic[96];
+  snprintf(topic, sizeof(topic), "%s/%s/%s/config", DISCOVERY_PREFIX, component, objectId);
+
+  // Every entity shares the same device block so they group under one device.
+  char payload[480];
+  int n = snprintf(payload, sizeof(payload),
+    "{\"unique_id\":\"%s_%s\",%s,"
+    "\"availability_topic\":\"" AVAILABILITY_TOPIC "\","
+    "\"device\":{\"identifiers\":[\"" HA_DEVICE_ID "\"],"
+    "\"name\":\"Garage Opener\",\"manufacturer\":\"DIY\","
+    "\"model\":\"ESP-12E + VL53L0X\"}}",
+    HA_DEVICE_ID, objectId, body);
+
+  if( n <= 0 || n >= (int)sizeof(payload) ) {
+    Serial.print("Discovery payload too large for ");
+    Serial.println(objectId);
+    return;
   }
+
+  client.publish(topic, payload, true);
+}
+
+// Announces the door sensor, raw distance sensor and door button to Home
+// Assistant. Safe to call on every connect: the ids are fixed, so Home
+// Assistant updates the existing entities rather than creating new ones.
+void publishDiscovery() {
+  publishDiscoveryEntry("binary_sensor", "door",
+    "\"name\":\"Door\",\"device_class\":\"garage_door\","
+    "\"state_topic\":\"" DOOR_TOPIC "\","
+    "\"payload_on\":\"open\",\"payload_off\":\"closed\"");
+
+  publishDiscoveryEntry("sensor", "distance",
+    "\"name\":\"Raw Distance\",\"device_class\":\"distance\","
+    "\"unit_of_measurement\":\"mm\",\"state_class\":\"measurement\","
+    "\"state_topic\":\"" DISTANCE_TOPIC "\"");
+
+  publishDiscoveryEntry("button", "button",
+    "\"name\":\"Door Button\","
+    "\"command_topic\":\"" COMMAND_TOPIC "\","
+    "\"payload_press\":\"doorbutton\"");
+}
+
+// Non-blocking: makes at most one connection attempt every 5 seconds and
+// returns immediately otherwise, so loop() keeps servicing everything else.
+void reconnectMQTT() {
+  static unsigned long lastAttempt = 0;
+  static bool attempted = false;
+
+  if( client.connected() ) return;
+  if( attempted && (millis() - lastAttempt) < 5000 ) return;
+
+  attempted = true;
+  lastAttempt = millis();
+
+  Serial.print("Attempting MQTT connection...");
+
+  // Attempt to connect, registering a retained last-will so Home Assistant
+  // marks the entities unavailable if the device drops off the network.
+  if (client.connect(MQTT_CLIENT_ID, NULL, NULL, AVAILABILITY_TOPIC, 0, true, "offline")) {
+    Serial.println("connected");
+
+    // ... and resubscribe
+    client.subscribe( COMMAND_TOPIC );
+
+    publishDiscovery();
+    client.publish( AVAILABILITY_TOPIC, "online", true );
+    needToPublishHaState = true;
+
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(client.state());
+    Serial.println(" will retry in 5 seconds");
+  }
+}
+
+bool lastPublishedDoorOpen = false;
+
+// Publishes the current confirmed door state and raw distance, retained, to
+// the topics Home Assistant's discovered entities read from.
+void publishHaState() {
+  if( !haStateValid ) return;
+
+  client.publish( DOOR_TOPIC, confirmedDoorOpen ? "open" : "closed", true );
+  client.publish( DISTANCE_TOPIC, String(lastRawDistance).c_str(), true );
+
+  lastPublishedDoorOpen = confirmedDoorOpen;
+  needToPublishHaState = false;
 }
 
 void checkDistance() {
@@ -995,6 +1160,16 @@ void checkDistance() {
       // Periodically send messages even if percent distance has not changed enough
       else if( (millis() - lastStatusSend) >= config.statusResendInterval ) {
         sendMsg = true;
+      }
+
+      lastRawDistance = distanceInfo.distance;
+      haStateValid = true;
+
+      // Home Assistant state (retained). Published when the confirmed door
+      // state changes (which can lag the distance change by a few readings),
+      // on the regular distance/resend triggers, and after (re)connecting.
+      if( client.connected() && (needToPublishHaState || sendMsg || confirmedDoorOpen != lastPublishedDoorOpen) ) {
+        publishHaState();
       }
 
       // If we are connected to the mqtt server publish a message
